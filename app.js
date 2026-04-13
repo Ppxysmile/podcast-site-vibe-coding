@@ -445,10 +445,20 @@ function setupAudio() {
     state.audio.addEventListener('ended', handleAudioEnded);
     state.audio.addEventListener('loadedmetadata', () => {
         document.getElementById('duration').textContent = formatTime(state.audio.duration);
+        updatePlayerUI();
     });
     state.audio.addEventListener('error', (e) => {
         console.error('Audio error:', e);
-        showToast('Audio playback error. Please try another episode.');
+        showToast(state.language === 'zh' ? '播放错误，请尝试其他节目' : 'Audio playback error. Please try another episode.');
+    });
+    // Keep state.isPlaying in sync with actual audio state
+    state.audio.addEventListener('playing', () => {
+        state.isPlaying = true;
+        updatePlayerUI();
+    });
+    state.audio.addEventListener('pause', () => {
+        state.isPlaying = false;
+        updatePlayerUI();
     });
 }
 
@@ -468,26 +478,15 @@ function setupEventListeners() {
     });
 
     // Dark mode toggle
-    document.getElementById('darkModeToggle').addEventListener('click', toggleDarkMode);
-
-    // Language toggle
-    document.getElementById('langToggle').addEventListener('click', toggleLanguage);
+    const darkModeToggle = document.getElementById('darkModeToggle');
+    if (darkModeToggle) {
+        darkModeToggle.addEventListener('click', toggleDarkMode);
+    }
 
     // Search
     document.getElementById('searchInput').addEventListener('input', debounce(handleSearch, 300));
 
-    // Player controls
-    document.getElementById('playPauseBtn').addEventListener('click', togglePlayPause);
-    document.getElementById('prevBtn').addEventListener('click', playPrevious);
-    document.getElementById('nextBtn').addEventListener('click', playNext);
-    document.getElementById('shuffleBtn').addEventListener('click', toggleShuffle);
-    document.getElementById('loopBtn').addEventListener('click', toggleLoop);
-    document.getElementById('progressBar').addEventListener('click', seekAudio);
-    document.getElementById('speedBtn').addEventListener('click', cycleSpeed);
-    document.getElementById('volumeBtn').addEventListener('click', toggleMute);
-    document.getElementById('volumeSlider').addEventListener('input', handleVolumeChange);
-    document.getElementById('volumeSlider').value = state.volume;
-    document.getElementById('timerBtn').addEventListener('click', showTimerModal);
+    // Player controls - removed old player bar controls (now using floating player with inline onclick)
 
     // Timer options
     document.querySelectorAll('.timer-option').forEach(btn => {
@@ -499,6 +498,17 @@ function setupEventListeners() {
 
     // Clear history
     document.getElementById('clearHistoryBtn').addEventListener('click', clearHistory);
+
+    // Floating player drag progress
+    const floatingProgress = document.getElementById('floatingProgressBar');
+    if (floatingProgress) {
+        floatingProgress.addEventListener('mousedown', startFloatingDrag);
+        floatingProgress.addEventListener('touchstart', startFloatingDrag, { passive: false });
+    }
+    document.addEventListener('mousemove', moveFloatingDrag);
+    document.addEventListener('touchmove', moveFloatingDrag, { passive: false });
+    document.addEventListener('mouseup', endFloatingDrag);
+    document.addEventListener('touchend', endFloatingDrag);
 
     // Modal close on overlay click
     document.querySelectorAll('.modal-overlay').forEach(modal => {
@@ -587,7 +597,20 @@ function renderPodcasts(category = 'all') {
         overlay.addEventListener('click', (e) => {
             e.stopPropagation();
             const podcastId = overlay.dataset.podcastId;
-            playPodcast(podcastId);
+            const podcast = state.podcasts.find(p => p.id === podcastId);
+
+            // If external podcast, open in new tab
+            if (podcast && podcast.isExternal) {
+                playPodcast(podcastId);
+                return;
+            }
+
+            // If same podcast is playing, toggle play/pause
+            if (state.currentPodcast && state.currentPodcast.id === podcastId) {
+                togglePlayPause();
+            } else {
+                playPodcast(podcastId);
+            }
         });
     });
 
@@ -601,6 +624,23 @@ function renderPodcasts(category = 'all') {
                 showPodcastDetail(card.dataset.podcastId);
             }
         });
+    });
+
+    // Update play icons based on current playing state
+    updatePlayIcons();
+}
+
+// Update all play overlay icons to reflect playing state
+function updatePlayIcons() {
+    document.querySelectorAll('.play-overlay').forEach(overlay => {
+        const podcastId = overlay.dataset.podcastId;
+        const icon = overlay.querySelector('.play-icon');
+        if (!icon) return;
+
+        const isCurrentPlaying = state.currentPodcast &&
+                                state.currentPodcast.id === podcastId &&
+                                state.isPlaying;
+        icon.textContent = isCurrentPlaying ? '⏸️' : '▶️';
     });
 }
 
@@ -651,7 +691,20 @@ function renderLibrary() {
         overlay.addEventListener('click', (e) => {
             e.stopPropagation();
             const podcastId = overlay.dataset.podcastId;
-            playPodcast(podcastId);
+            const podcast = state.podcasts.find(p => p.id === podcastId);
+
+            // If external podcast, open in new tab
+            if (podcast && podcast.isExternal) {
+                playPodcast(podcastId);
+                return;
+            }
+
+            // If same podcast is playing, toggle play/pause
+            if (state.currentPodcast && state.currentPodcast.id === podcastId) {
+                togglePlayPause();
+            } else {
+                playPodcast(podcastId);
+            }
         });
     });
 
@@ -1065,16 +1118,25 @@ function playEpisodeObject(podcast, episode, episodeList = null) {
     updatePlayerUI();
     addToHistory(episode, podcast);
 
-    document.getElementById('playerBar').classList.add('visible');
+    // Show floating player
+    document.getElementById('floatingPlayer').style.display = 'block';
 }
 
 function playFromHistory(index) {
     const item = state.history[index];
-    const podcast = state.podcasts.find(p => p.title === item.podcastTitle);
-    if (podcast && item.audioUrl) {
+    // Try to find podcast by id or title
+    let podcast = state.podcasts.find(p => p.id === item.podcastId);
+    if (!podcast) {
+        podcast = state.podcasts.find(p => p.title === item.podcastTitle);
+    }
+    if (!podcast) {
+        showToast(state.language === 'zh' ? '播客已移除' : 'Podcast no longer available');
+        return;
+    }
+    if (item.audioUrl) {
         playEpisodeObject(podcast, item);
     } else {
-        showToast('Episode no longer available');
+        showToast(state.language === 'zh' ? '节目已下架' : 'Episode no longer available');
     }
 }
 
@@ -1085,17 +1147,25 @@ function togglePlayPause() {
         return;
     }
 
-    if (state.isPlaying) {
-        state.audio.pause();
+    if (state.audio.paused) {
+        state.audio.play().catch(err => {
+            console.error('Playback error:', err);
+            showToast(state.language === 'zh' ? '播放错误，请重试' : 'Playback error. Please try again.');
+        });
     } else {
-        state.audio.play();
+        state.audio.pause();
     }
-    state.isPlaying = !state.isPlaying;
-    updatePlayerUI();
+    // state.isPlaying will be updated by the 'playing' and 'pause' event listeners
 }
 
 function playNext() {
     const noNext = state.language === 'zh' ? '没有下一首了' : 'No next episode';
+
+    // Check if we have a valid episode list
+    if (!state.currentEpisodeList || state.currentEpisodeList.length === 0) {
+        showToast(noNext);
+        return;
+    }
 
     if (state.playMode === 'shuffle') {
         // Random mode: pick a random episode
@@ -1113,8 +1183,9 @@ function playNext() {
     }
 
     // Normal mode: play next in order
-    if (state.currentEpisodeIndex < state.currentEpisodeList.length - 1) {
-        state.currentEpisodeIndex++;
+    const nextIndex = state.currentEpisodeIndex + 1;
+    if (nextIndex < state.currentEpisodeList.length) {
+        state.currentEpisodeIndex = nextIndex;
         const nextEpisode = state.currentEpisodeList[state.currentEpisodeIndex];
         playEpisodeObject(state.currentPodcast, nextEpisode, state.currentEpisodeList);
     } else {
@@ -1125,6 +1196,12 @@ function playNext() {
 function playPrevious() {
     const noPrev = state.language === 'zh' ? '没有上一首了' : 'No previous episode';
 
+    // Check if we have a valid episode list
+    if (!state.currentEpisodeList || state.currentEpisodeList.length === 0) {
+        showToast(noPrev);
+        return;
+    }
+
     // If current time > 3 seconds, restart current episode
     if (state.audio.currentTime > 3) {
         state.audio.currentTime = 0;
@@ -1132,8 +1209,9 @@ function playPrevious() {
     }
 
     // Otherwise go to previous episode
-    if (state.currentEpisodeIndex > 0) {
-        state.currentEpisodeIndex--;
+    const prevIndex = state.currentEpisodeIndex - 1;
+    if (prevIndex >= 0) {
+        state.currentEpisodeIndex = prevIndex;
         const prevEpisode = state.currentEpisodeList[state.currentEpisodeIndex];
         playEpisodeObject(state.currentPodcast, prevEpisode, state.currentEpisodeList);
     } else {
@@ -1159,18 +1237,26 @@ function handleAudioEnded() {
 
 // ==================== Player UI ====================
 function updatePlayerUI() {
-    const playBtn = document.getElementById('playPauseBtn');
-    playBtn.textContent = state.isPlaying ? '⏸️' : '▶️';
-
-    if (state.currentEpisode && state.currentPodcast) {
-        document.getElementById('playerTitle').textContent = state.currentEpisode.title;
-        document.getElementById('playerEpisode').textContent = getPodcastTitle(state.currentPodcast);
-        document.getElementById('playerCover').textContent = state.currentPodcast.cover;
+    // Update floating player play/pause button
+    const floatingPlayPause = document.getElementById('floatingPlayPause');
+    if (floatingPlayPause) {
+        floatingPlayPause.textContent = state.isPlaying ? '⏸️' : '▶️';
     }
 
-    document.getElementById('speedBtn').textContent = `${state.speed}x`;
-    document.getElementById('shuffleBtn').style.opacity = state.playMode === 'shuffle' ? '1' : '0.5';
-    document.getElementById('loopBtn').style.opacity = state.playMode === 'loop' ? '1' : '0.5';
+    // Update floating player info
+    if (state.currentEpisode && state.currentPodcast) {
+        const floatingTitle = document.getElementById('floatingTitle');
+        const floatingCover = document.getElementById('floatingCover');
+        if (floatingTitle) {
+            floatingTitle.textContent = state.currentEpisode.title;
+        }
+        if (floatingCover) {
+            floatingCover.textContent = state.currentPodcast.cover || '🎧';
+        }
+    }
+
+    // Update all cover play icons
+    updatePlayIcons();
 }
 
 function updateProgress() {
@@ -1180,9 +1266,15 @@ function updateProgress() {
     const duration = state.audio.duration;
     const percent = (current / duration) * 100;
 
-    document.getElementById('progressFill').style.width = `${percent}%`;
-    document.getElementById('currentTime').textContent = formatTime(current);
-    document.getElementById('duration').textContent = formatTime(duration);
+    // Update floating player progress
+    const floatingProgressFill = document.getElementById('floatingProgressFill');
+    const floatingTime = document.getElementById('floatingTime');
+    if (floatingProgressFill) {
+        floatingProgressFill.style.width = `${percent}%`;
+    }
+    if (floatingTime) {
+        floatingTime.textContent = `${formatTime(current)} / ${formatTime(duration)}`;
+    }
 }
 
 function seekAudio(e) {
@@ -1190,6 +1282,37 @@ function seekAudio(e) {
     const rect = bar.getBoundingClientRect();
     const percent = (e.clientX - rect.left) / rect.width;
     state.audio.currentTime = percent * state.audio.duration;
+}
+
+// Floating player progress seek
+function seekFloatingAudio(e) {
+    const bar = document.getElementById('floatingProgressBar');
+    if (!bar) return;
+    const rect = bar.getBoundingClientRect();
+    const percent = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    state.audio.currentTime = percent * state.audio.duration;
+}
+
+// Floating player drag progress
+let floatingDragging = false;
+function startFloatingDrag(e) {
+    floatingDragging = true;
+    seekFloatingAudio(e);
+}
+function moveFloatingDrag(e) {
+    if (!floatingDragging) return;
+    e.preventDefault();
+    const bar = document.getElementById('floatingProgressBar');
+    if (!bar) return;
+    const rect = bar.getBoundingClientRect();
+    const percent = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    const fill = document.getElementById('floatingProgressFill');
+    if (fill) fill.style.width = `${percent * 100}%`;
+}
+function endFloatingDrag(e) {
+    if (!floatingDragging) return;
+    floatingDragging = false;
+    seekFloatingAudio(e);
 }
 
 // ==================== Playback Controls ====================
@@ -1307,6 +1430,7 @@ function addToHistory(episode, podcast) {
         id: episode.id,
         title: episode.title,
         audioUrl: episode.audioUrl,
+        podcastId: podcast.id,
         podcastTitle: getPodcastTitle(podcast),
         duration: episode.duration,
         playedAt: new Date().toISOString()
@@ -1338,20 +1462,50 @@ async function handleSearch() {
     try {
         const results = await searchItunes(query);
         if (results.length === 0) {
-            resultsContainer.innerHTML = '<div class="empty-state"><p>No results found.</p></div>';
+            resultsContainer.innerHTML = '<div class="empty-state"><p>' + (state.language === 'zh' ? '未找到结果' : 'No results found.') + '</p></div>';
             return;
         }
-        resultsContainer.innerHTML = results.map(podcast => `
-            <div class="search-result-item" onclick="showPodcastDetail('${podcast.id}')">
-                <div class="search-result-cover">${podcast.cover}</div>
+        resultsContainer.innerHTML = results.map((podcast, index) => `
+            <div class="search-result-item" data-index="${index}">
+                <div class="search-result-cover"><img src="${podcast.cover}" alt="" onerror="this.textContent='🎧'"></div>
                 <div class="search-result-info">
-                    <div class="search-result-title">${getPodcastTitle(podcast)}</div>
+                    <div class="search-result-title">${podcast.title}</div>
                     <div class="search-result-artist">${podcast.artist || (state.language === 'zh' ? '未知艺术家' : 'Unknown Artist')}</div>
                 </div>
             </div>
         `).join('');
+
+        // Add click handlers after rendering
+        resultsContainer.querySelectorAll('.search-result-item').forEach((item, idx) => {
+            item.addEventListener('click', () => {
+                const podcast = results[idx];
+                if (podcast.rss) {
+                    // Add to podcasts and play
+                    const newPodcast = {
+                        id: podcast.id,
+                        title: podcast.title,
+                        titleZh: podcast.title,
+                        category: podcast.category || '其他',
+                        categoryZh: podcast.category || '其他',
+                        cover: '🎧',
+                        coverUrl: podcast.cover,
+                        rss: podcast.rss,
+                        description: podcast.description || '',
+                        descriptionZh: podcast.description || '',
+                        isExternal: false
+                    };
+                    // Check if already exists
+                    if (!state.podcasts.find(p => p.id === podcast.id)) {
+                        state.podcasts.push(newPodcast);
+                    }
+                    showPodcastDetail(podcast.id);
+                } else {
+                    showToast(state.language === 'zh' ? '该播客暂无RSS订阅' : 'No RSS feed available.');
+                }
+            });
+        });
     } catch (error) {
-        resultsContainer.innerHTML = '<div class="empty-state"><p>Search failed. Try again.</p></div>';
+        resultsContainer.innerHTML = '<div class="empty-state"><p>' + (state.language === 'zh' ? '搜索失败，请重试' : 'Search failed. Try again.') + '</p></div>';
     }
 }
 
@@ -1443,6 +1597,8 @@ function switchView(view) {
     });
 
     // Show/hide sections
+    document.getElementById('heroSection').style.display = view === 'discover' ? 'block' : 'none';
+    document.getElementById('categoriesSection').style.display = view === 'discover' ? 'block' : 'none';
     document.getElementById('podcastSection').style.display = view === 'discover' ? 'block' : 'none';
     document.getElementById('librarySection').style.display = view === 'library' ? 'block' : 'none';
     document.getElementById('historySection').style.display = view === 'history' ? 'block' : 'none';
